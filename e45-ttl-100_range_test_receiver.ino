@@ -1,5 +1,10 @@
-//#include <VirtualWire.h>
 #include <Adafruit_SSD1306.h>
+
+#define SEND_DELAY 250
+#define BUFFER_LEN 21
+#define BUFFER_DELAY 200
+#define OLED_UPDATE_DELAY 200
+#define UART_SPEED 57600
 
 /*
  * Code for moving device
@@ -9,8 +14,6 @@
 Adafruit_SSD1306 display(OLED_RESET);
 
 #define LED_PIN 13
-
-uint8_t counter = 0; 
 
 void setup() {
   /*
@@ -26,17 +29,8 @@ void setup() {
 
   delay(1000);
 
-  Serial.begin(9600);
+  Serial.begin(UART_SPEED);
 }
-
-int currentPacket = 0;
-uint8_t errorRate = 0;
-uint8_t expectedPacket = 0;
-
-long lastReceive = millis();
-long oledUpdate = millis();
-
-uint32_t lastSentMillis = 0;
 
 enum dataStates {
   IDLE,
@@ -48,6 +42,70 @@ enum dataStates {
 uint8_t protocolState = IDLE;
 uint8_t dataBytesReceived = 0;
 uint32_t incomingData;
+
+uint8_t packetLostBuffer[BUFFER_LEN] = {0};
+uint8_t bufferPointer = 0;
+uint8_t bufferLocked = 0;
+uint32_t lastBufferReset = 0;
+
+void storeBufferSuccess() {
+  if (bufferLocked == 0) {
+    packetLostBuffer[bufferPointer] = 1;
+    bufferLocked = 1;
+  }
+}
+
+void storeBufferFailure() {
+  if (bufferLocked == 0) {
+    packetLostBuffer[bufferPointer] = 0;
+    bufferLocked = 1;
+  }
+}
+
+void resetBuffer() {
+  bufferPointer++;
+
+  if (bufferPointer == BUFFER_LEN) {
+    bufferPointer = 0;
+  }
+
+  packetLostBuffer[bufferPointer] = 2;
+  bufferLocked = 0;
+  
+  lastBufferReset = millis();
+}
+
+uint8_t getSuccessCount() {
+  uint8_t out = 0;
+
+  for (uint8_t i = 0; i < BUFFER_LEN; i++) {
+    if (packetLostBuffer[i] == 1) {
+      out++;
+    }
+  }
+
+  if (out > BUFFER_LEN - 1) {
+    out = BUFFER_LEN - 1;
+  }
+
+  return out;
+}
+
+uint8_t getSuccessRate() {
+  return (100 / (BUFFER_LEN - 1)) * getSuccessCount();
+}
+
+void checkBuffer() {
+
+  if (millis() - lastBufferReset > BUFFER_DELAY) {
+    storeBufferFailure();
+  }
+  
+}
+
+uint32_t lastOledUpdate = 0;
+uint32_t lastSentMillis = 0;
+uint32_t lastPacketDelay = 0;
 
 void loop() {
 
@@ -75,19 +133,32 @@ void loop() {
       if (dataBytesReceived == 4) {
         protocolState = IDLE;
 
-        int32_t diff = (micros() - incomingData) / 1000;
-
-        display.clearDisplay();
-        display.setCursor(0, 0);
-        display.print("Delay: ");
-        display.print(diff); 
-        display.print("ms");
-        display.display(); 
+        lastPacketDelay = (micros() - incomingData) / 1000;
+        
+        storeBufferSuccess();
       }
     }
   }
 
-  if (millis() - lastSentMillis > 500) {
+  checkBuffer();
+
+  if (millis() - lastOledUpdate > OLED_UPDATE_DELAY) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("Delay: ");
+    display.print(lastPacketDelay); 
+    display.print("ms");
+
+    display.setCursor(0, 12);
+    display.print("Success: ");
+    display.print(getSuccessRate()); 
+    display.print("%");
+    
+    display.display(); 
+    lastOledUpdate = millis();
+  }
+
+  if (millis() - lastSentMillis > SEND_DELAY) {
     Serial.write(0xff);
 
     uint32_t toSend = micros();
@@ -101,56 +172,10 @@ void loop() {
     Serial.write(buf, sizeof(buf));
     Serial.end();
     lastSentMillis = millis();
-    delay(30);
-    Serial.begin(9600);
-  }
+    delay(10);
 
-  /*
-  bool isError = false;
-
-  if (Serial.available()) {
-    currentPacket = Serial.read();
-    lastReceive = millis();
-
-    if (currentPacket != expectedPacket) {
-      isError = true;
-      errorRate++; 
-    }
-
-    expectedPacket = currentPacket + 1;
-
-    if (!isError) {
-      if (errorRate > 0) {
-        errorRate--;
-      }
-    }
-  }
-
-  if (!isError && millis() - lastReceive > 200) {
-    errorRate++;
-    isError = true;
-    lastReceive = millis();
-  }
-
-  if (errorRate > 100) {
-    errorRate= 100;
-  }
- 
-  if (millis() - oledUpdate > 150) {
-    display.clearDisplay();
+    resetBuffer();
     
-    display.setCursor(0, 0);
-    display.print("Packet: ");
-    display.print(currentPacket);
-
-    display.setCursor(0, 10);
-    display.print("Error rate: ");
-    display.print(errorRate);
-    
-    
-    display.display(); 
-
-    oledUpdate = millis();
+    Serial.begin(UART_SPEED);
   }
-  */
 }
